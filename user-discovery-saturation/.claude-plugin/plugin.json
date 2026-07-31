@@ -1,0 +1,7 @@
+{
+  "name": "user-discovery-saturation",
+  "description": "Enforces stated prevalence (N of M interviews), named (not dropped) contradicting evidence, and Guest/Bunce/Johnson 2006 saturation discipline (~12 interviews in a homogeneous sample) on user-discovery verdicts.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}

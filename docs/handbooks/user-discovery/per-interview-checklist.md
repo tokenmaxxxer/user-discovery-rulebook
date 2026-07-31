@@ -1,0 +1,29 @@
+# Per-Interview Checklist
+
+Checklist run after each user-discovery interview round.
+
+2. Keep asking about the interviewee's past behavior until it is exhausted
+   before pitching anything (Mom Test). Do not introduce the
+   idea/product/solution until you have run out of concrete past-behavior
+   questions to ask — pitching early anchors the interviewee's answers and
+   contaminates the rest of the interview. This is a content-judgment call
+   for the interviewer to make; it is not enforced by any automated gate.
+
+3. Tag every claim recorded from the interview with its evidence strength:
+   `behavioral` (what the person actually did), `recounted` (what the person
+   says they did), or `opinion` (what the person thinks/feels/would do). For
+   each claim, also flag whether it was volunteered unprompted or surfaced
+   only after a prompt from the interviewer — prompted claims carry weaker
+   evidentiary weight than unprompted ones. The `user-discovery-evidence-tagging`
+   plugin gates `docs/issue-<n>/reports/user-discovery.md` writes to require
+   at least one of these three tags be present in the record; it does not
+   and cannot verify that individual claims are tagged correctly or that the
+   prompted/unprompted flag is present — that judgment remains the
+   interviewer's.
+
+4. Update the running saturation count for this study (interviews
+   completed so far out of the sample). Note in the round's log whether
+   this round crossed the ~12-interview heuristic threshold (Guest, Bunce &
+   Johnson 2006, for a reasonably homogeneous sample) — this is a trigger
+   to review whether new themes are still emerging, not a hard stop on
+   further interviews.

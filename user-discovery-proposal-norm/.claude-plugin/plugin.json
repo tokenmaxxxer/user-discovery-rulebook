@@ -1,0 +1,7 @@
+{
+  "name": "user-discovery-proposal-norm",
+  "description": "Phase-1 proposal survey-first/sourced-evidence norm for the user-discovery role — denies a proposal write with no cited survey path under docs/issue-<n>/reports/user-discovery/.",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}
