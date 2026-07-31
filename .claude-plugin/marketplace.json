@@ -8,6 +8,26 @@
       "name": "user-discovery",
       "source": "./user-discovery",
       "description": "The user-discovery role on contract v3 (issue-160 round-4 promotion). Decides: 이 문제가 실제 사용자의 고통인가."
+    },
+    {
+      "name": "user-discovery-proposal-norm",
+      "source": "./user-discovery-proposal-norm",
+      "description": "Phase-1 proposal survey-first/sourced-evidence norm for the user-discovery role — denies a proposal write with no cited survey path under docs/issue-<n>/reports/user-discovery/."
+    },
+    {
+      "name": "user-discovery-hypothesis-order",
+      "source": "./user-discovery-hypothesis-order",
+      "description": "Customer Development ordering discipline — falsifiable hypotheses stated before interviews, evidence before verdict."
+    },
+    {
+      "name": "user-discovery-evidence-tagging",
+      "source": "./user-discovery-evidence-tagging",
+      "description": "Mom Test evidence-strength tagging discipline — denies a record write with no behavioral|recounted|opinion tag."
+    },
+    {
+      "name": "user-discovery-saturation",
+      "source": "./user-discovery-saturation",
+      "description": "Enforces stated prevalence (N of M interviews), named (not dropped) contradicting evidence, and Guest/Bunce/Johnson 2006 saturation discipline (~12 interviews in a homogeneous sample) on user-discovery verdicts."
     }
   ]
 }

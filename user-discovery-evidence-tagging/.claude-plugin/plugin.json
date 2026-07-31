@@ -1,0 +1,7 @@
+{
+  "name": "user-discovery-evidence-tagging",
+  "description": "Mom Test evidence-strength tagging discipline — denies a record write with no behavioral|recounted|opinion tag",
+  "author": {
+    "name": "Jung Jiwon & Lee Jongkwan"
+  }
+}
