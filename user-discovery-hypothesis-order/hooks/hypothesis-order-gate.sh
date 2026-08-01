@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
-# PreToolUse gate (Write|Edit|MultiEdit) — user-discovery-hypothesis-order,
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
+set -uo pipefail
+# PreToolUse gate (Write|Edit|MultiEdit|Bash) — user-discovery-hypothesis-order,
 # per docs/issue-7/proposals/plugin-enforcement-hardening.md §2.
 #
 # Targets: docs/issue-<n>/reports/user-discovery.md only — this plugin's one
@@ -16,21 +17,30 @@ trap __fc EXIT
 # still false (checked against persisted state OR fresh detection in the
 # same write's reconstructed content) is refused.
 #
+# State-timing fix (issue-10 audit): this script is now READ-ONLY against
+# .state.json. Persisting the three booleans is deferred to
+# hooks/hypothesis-order-state-sync.sh, a PostToolUse hook (registered in
+# this plugin's own hooks.json) that only fires once the write actually
+# landed — i.e. once every gate on the same tool call, including sibling
+# plugins' gates, allowed it. Before this fix, this script called
+# save_state() unconditionally at PreToolUse time, so a write this gate
+# itself allowed but a sibling gate (evidence-tagging/saturation) denied
+# still advanced .state.json for a write that never happened.
+#
+# Sources core/hooks/lib/gate-lib.sh (issue-72 gate-house standard) for the
+# fail-closed trap, kill switch, deny protocol, JSON parsing, path
+# normalization, and Edit/MultiEdit/NotebookEdit reconstruction — reference
+# only, never vendored, per docs/handbooks/canon-scripts.md.
+#
 # Kill switch: export USER_DISCOVERY_HYPOTHESIS_ORDER_GATE_OFF=1
-set -uo pipefail
-
 role="${CLAUDE_ROLE:-user-discovery}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
 
-case "${USER_DISCOVERY_HYPOTHESIS_ORDER_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+gate_kill_switch_active "${USER_DISCOVERY_HYPOTHESIS_ORDER_GATE_OFF:-}" || { trap - EXIT; exit 0; }
 
-command -v python3 >/dev/null 2>&1 || deny "hypothesis-order-gate.sh requires python3, which is not on PATH; denying rather than guessing."
+command -v python3 >/dev/null 2>&1 || gate_deny "$role" "hypothesis-order-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
 payload="$(cat 2>/dev/null || true)"
-[ -n "$payload" ] || deny "hypothesis-order-gate: empty tool-use payload on stdin; cannot evaluate the ordering gate."
+[ -n "$payload" ] || gate_deny "$role" "hypothesis-order-gate: empty tool-use payload on stdin; cannot evaluate the ordering gate."
 
 _target="$(printf '%s' "$payload" | python3 -c '
 import json,sys
@@ -66,24 +76,38 @@ if [ -z "$root" ]; then
   root="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
 [ -z "$root" ] && root="$(git -C "$(pwd -P)" rev-parse --show-toplevel 2>/dev/null || true)"
-[ -z "$root" ] && deny "no project root could be determined; failing closed (ordering check cannot run)."
+[ -z "$root" ] && gate_deny "$role" "no project root could be determined; failing closed (ordering check cannot run)."
 
-PG_PAYLOAD="$payload" PG_ROOT="$root" \
+_bash_cmd="$(printf '%s' "$payload" | python3 -c '
+import json,sys
+try: e=json.loads(sys.stdin.read())
+except Exception: sys.exit(0)
+if not isinstance(e,dict): sys.exit(0)
+ti=e.get("tool_input")
+cmd=ti.get("command") if isinstance(ti,dict) else None
+if e.get("tool_name")=="Bash" and isinstance(cmd,str): print(cmd)
+' 2>/dev/null || true)"
+BASH_TOKENS=""
+[ -n "$_bash_cmd" ] && BASH_TOKENS="$(gate_bash_write_targets "$_bash_cmd")"
+
+SEMANTIC_PY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../user-discovery/hooks/lib" && pwd -P)/_semantic.py"
+
+PG_PAYLOAD="$payload" PG_ROOT="$root" PG_BASH_TOKENS="$BASH_TOKENS" SEMANTIC_PY="$SEMANTIC_PY" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
-    import json, os, posixpath, re, sys
+    import importlib.util, json, os, posixpath, re, sys
 
     def deny(m):
         sys.stderr.write("user-discovery: refused — %s\n" % m); sys.exit(2)
 
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+    gate_lib = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(gate_lib)
+    _sspec = importlib.util.spec_from_file_location("semantic", os.environ["SEMANTIC_PY"])
+    semantic = importlib.util.module_from_spec(_sspec); _sspec.loader.exec_module(semantic)
+
     raw = os.environ.get("PG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge ordering on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on ordering.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -91,35 +115,38 @@ try:
         deny("tool_input is missing or not a JSON object; the gate cannot judge a write it cannot parse (ordering).")
 
     root = posixpath.normpath(os.environ["PG_ROOT"].replace("\\", "/"))
-    RECORD_RE = re.compile(r'^docs/issue-[0-9]+/reports/user-discovery\.md$')
+    RECORD_RE = re.compile(r'^docs/issue-([0-9]+)/reports/user-discovery\.md$')
 
-    def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
-        try:
-            return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
-        except OSError:
-            return a
+    if tool == "Bash":
+        for tok in os.environ.get("PG_BASH_TOKENS", "").splitlines():
+            if not tok:
+                continue
+            rel = gate_lib.gate_normalize_path(root, tok)
+            if rel is not None and RECORD_RE.match(rel):
+                deny(
+                    "a Bash-tool command appears to write to %s (matches this plugin's owned "
+                    "record path) but the gate cannot determine the resulting content from a "
+                    "Bash command; use Write/Edit/MultiEdit instead so hypothesis-order can be "
+                    "checked." % rel
+                )
+        sys.exit(0)
 
     path = None
-    if tool in ("Write", "Edit", "MultiEdit"):
-        p = ti.get("file_path")
+    if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        p = ti.get("file_path") or ti.get("notebook_path")
         if isinstance(p, str) and p:
             path = p
     if path is None:
         sys.exit(0)
 
-    r = resolve(path)
-    if not r.startswith(root + "/"):
-        sys.exit(0)
-    rel = r[len(root):].lstrip("/")
+    rel = gate_lib.gate_normalize_path(root, path)
+    if rel is None:
+        sys.exit(0)  # outside project root — not this plugin's business
     m = RECORD_RE.match(rel)
     if not m:
         sys.exit(0)  # not this plugin's owned record file — not this plugin's business
 
-    issue_m = re.match(r'^docs/issue-([0-9]+)/reports/user-discovery\.md$', rel)
-    issue_n = issue_m.group(1)
+    issue_n = m.group(1)
     state_path = os.path.join(root, "docs", "issue-%s" % issue_n, "reports", "user-discovery", ".state.json")
 
     def load_state():
@@ -135,14 +162,7 @@ try:
                 pass
         return default
 
-    def save_state(state):
-        try:
-            os.makedirs(os.path.dirname(state_path), exist_ok=True)
-            with open(state_path, "w", encoding="utf-8") as fh:
-                json.dump(state, fh)
-        except OSError:
-            pass
-
+    r = posixpath.join(root, rel)
     current = None
     if os.path.isfile(r):
         try:
@@ -151,31 +171,8 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on ordering." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
-
-    if new_text is None:
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
         deny(
             "this write targets %s but the gate cannot determine the resulting content "
             "from the tool input (tool=%r). Write the full document with Write, or use an "
@@ -183,14 +180,8 @@ try:
             "checked." % (rel, tool)
         )
 
-    low = new_text.lower()
-
-    def has_any(*needles):
-        return any(nd in low for nd in needles)
-
-    hyp_marker = has_any("hypothesis:", "falsifiable hypothesis", "h1", "h2")
-    evidence_marker = has_any("behavioral", "recounted", "opinion")
-    verdict_marker = has_any("pain-confirmed", "not-confirmed", "insufficient-evidence")
+    evidence_marker = semantic.structural_marker(new_text, "behavioral", "recounted", "opinion", fields=("evidence",))
+    verdict_marker = semantic.word_present(new_text, "pain-confirmed", "not-confirmed", "insufficient-evidence")
 
     state = load_state()
     evidence_logged_effective = state["evidence_logged"] or evidence_marker
@@ -203,10 +194,9 @@ try:
             "Development discipline requires evidence before verdict — log evidence first." % rel
         )
 
-    state["hypotheses_stated"] = state["hypotheses_stated"] or hyp_marker
-    state["evidence_logged"] = evidence_logged_effective
-    state["verdict_written"] = state["verdict_written"] or verdict_marker
-    save_state(state)
+    # No save_state() here — persistence moved to the PostToolUse hook
+    # (hooks/hypothesis-order-state-sync.sh) so it only advances once this
+    # write, and every sibling gate on the same tool call, actually allowed.
 
     sys.exit(0)
 except Exception as _fc_e:  # fail-closed-on-internal-error

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-__fc(){ rc=$?; if [ "$rc" != 0 ] && [ "$rc" != 2 ]; then echo "fail-closed: gate aborted (rc=$rc)" >&2; exit 2; fi; }
-trap __fc EXIT
-# PreToolUse gate (Write|Edit|MultiEdit) — user-discovery-role-specific.
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+gate_trap_fail_closed
+set -uo pipefail
+# PreToolUse gate (Write|Edit|MultiEdit|Bash) — user-discovery-role-specific.
 #
 # Targets: docs/issue-<n>/proposals/*.md (phase-1 proposals) — this role's
 # survey-first/sourced-evidence norm per
@@ -12,21 +13,20 @@ trap __fc EXIT
 # survey-path-cited rule). The [assumption]-labeling rule is explicitly out
 # of scope for this gate.
 #
+# Sources core/hooks/lib/gate-lib.sh (issue-72 gate-house standard) for the
+# fail-closed trap, kill switch, deny protocol, JSON parsing, path
+# normalization, and Edit/MultiEdit/NotebookEdit reconstruction — reference
+# only, never vendored, per docs/handbooks/canon-scripts.md.
+#
 # Kill switch: export USER_DISCOVERY_PROPOSAL_NORM_GATE_OFF=1
-set -uo pipefail
-
 role="${CLAUDE_ROLE:-user-discovery}"
-deny() { echo "${role}: refused — $1" >&2; exit 2; }
 
-case "${USER_DISCOVERY_PROPOSAL_NORM_GATE_OFF:-}" in
-  ""|0|false|no|off) ;;
-  *) exit 0 ;;
-esac
+gate_kill_switch_active "${USER_DISCOVERY_PROPOSAL_NORM_GATE_OFF:-}" || { trap - EXIT; exit 0; }
 
-command -v python3 >/dev/null 2>&1 || deny "proposal-norm-gate.sh requires python3, which is not on PATH; denying rather than guessing."
+command -v python3 >/dev/null 2>&1 || gate_deny "$role" "proposal-norm-gate.sh requires python3, which is not on PATH; denying rather than guessing."
 
 payload="$(cat 2>/dev/null || true)"
-[ -n "$payload" ] || deny "proposal-norm-gate: empty tool-use payload on stdin; cannot evaluate the proposal norm gate."
+[ -n "$payload" ] || gate_deny "$role" "proposal-norm-gate: empty tool-use payload on stdin; cannot evaluate the proposal norm gate."
 
 _target="$(printf '%s' "$payload" | python3 -c '
 import json,sys
@@ -62,24 +62,34 @@ if [ -z "$root" ]; then
   root="$(git -C "$d" rev-parse --show-toplevel 2>/dev/null || true)"
 fi
 [ -z "$root" ] && root="$(git -C "$(pwd -P)" rev-parse --show-toplevel 2>/dev/null || true)"
-[ -z "$root" ] && deny "no project root could be determined; failing closed (proposal norm check cannot run)."
+[ -z "$root" ] && gate_deny "$role" "no project root could be determined; failing closed (proposal norm check cannot run)."
 
-PG_PAYLOAD="$payload" PG_ROOT="$root" \
+_bash_cmd="$(printf '%s' "$payload" | python3 -c '
+import json,sys
+try: e=json.loads(sys.stdin.read())
+except Exception: sys.exit(0)
+if not isinstance(e,dict): sys.exit(0)
+ti=e.get("tool_input")
+cmd=ti.get("command") if isinstance(ti,dict) else None
+if e.get("tool_name")=="Bash" and isinstance(cmd,str): print(cmd)
+' 2>/dev/null || true)"
+BASH_TOKENS=""
+[ -n "$_bash_cmd" ] && BASH_TOKENS="$(gate_bash_write_targets "$_bash_cmd")"
+
+PG_PAYLOAD="$payload" PG_ROOT="$root" PG_BASH_TOKENS="$BASH_TOKENS" \
 python3 <<'PY'
 import sys as _fc_sys  # fail-closed-on-internal-error
 try:
-    import json, os, posixpath, re, sys
+    import importlib.util, json, os, posixpath, re, sys
 
     def deny(m):
         sys.stderr.write("user-discovery: refused — %s\n" % m); sys.exit(2)
 
+    _spec = importlib.util.spec_from_file_location("gate_lib", os.environ["GATE_LIB_PY"])
+    gate_lib = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(gate_lib)
+
     raw = os.environ.get("PG_PAYLOAD", "")
-    try:
-        ev = json.loads(raw) if raw else {}
-    except ValueError:
-        deny("the tool-call payload is not valid JSON; the gate cannot judge the proposal norm on an unparseable write.")
-    if not isinstance(ev, dict):
-        deny("the tool-call payload is not a JSON object; failing closed on the proposal norm.")
+    ev = gate_lib.gate_parse_json_or_deny(raw, deny)
 
     tool = ev.get("tool_name")
     ti = ev.get("tool_input")
@@ -90,30 +100,35 @@ try:
     PROPOSAL_RE = re.compile(r'^docs/issue-[0-9]+/proposals/.*\.md$')
     SURVEY_RE = re.compile(r'docs/issue-[0-9]+/reports/user-discovery/')
 
-    def resolve(p):
-        n = p.replace("\\", "/")
-        a = n if posixpath.isabs(n) else posixpath.join(root, n)
-        a = posixpath.normpath(a)
-        try:
-            return posixpath.normpath(os.path.realpath(a).replace("\\", "/"))
-        except OSError:
-            return a
+    if tool == "Bash":
+        for tok in os.environ.get("PG_BASH_TOKENS", "").splitlines():
+            if not tok:
+                continue
+            rel = gate_lib.gate_normalize_path(root, tok)
+            if rel is not None and PROPOSAL_RE.match(rel):
+                deny(
+                    "a Bash-tool command appears to write to %s (matches this gate's owned "
+                    "proposal path) but the gate cannot determine the resulting content from "
+                    "a Bash command; use Write/Edit/MultiEdit instead so the survey-citation "
+                    "norm can be checked." % rel
+                )
+        sys.exit(0)
 
     path = None
-    if tool in ("Write", "Edit", "MultiEdit"):
-        p = ti.get("file_path")
+    if tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        p = ti.get("file_path") or ti.get("notebook_path")
         if isinstance(p, str) and p:
             path = p
     if path is None:
         sys.exit(0)
 
-    r = resolve(path)
-    if not r.startswith(root + "/"):
-        sys.exit(0)
-    rel = r[len(root):].lstrip("/")
+    rel = gate_lib.gate_normalize_path(root, path)
+    if rel is None:
+        sys.exit(0)  # outside project root — not this plugin's business
     if not PROPOSAL_RE.match(rel):
         sys.exit(0)  # not this plugin's business
 
+    r = posixpath.join(root, rel)
     current = None
     if os.path.isfile(r):
         try:
@@ -122,31 +137,8 @@ try:
         except OSError:
             deny("%s exists but cannot be read; failing closed on the proposal norm." % rel)
 
-    new_text = None
-    if tool == "Write":
-        c = ti.get("content")
-        if isinstance(c, str):
-            new_text = c
-    elif tool == "Edit":
-        o, n = ti.get("old_string"), ti.get("new_string")
-        if isinstance(o, str) and isinstance(n, str) and current is not None and o in current:
-            new_text = current.replace(o, n, 1)
-    elif tool == "MultiEdit":
-        edits = ti.get("edits")
-        text = current
-        if isinstance(edits, list) and text is not None:
-            ok = True
-            for e in edits:
-                if not isinstance(e, dict):
-                    ok = False; break
-                o, n = e.get("old_string"), e.get("new_string")
-                if not isinstance(o, str) or not isinstance(n, str) or o not in text:
-                    ok = False; break
-                text = text.replace(o, n, 1)
-            if ok:
-                new_text = text
-
-    if new_text is None:
+    new_text, ok = gate_lib.gate_reconstruct_write(tool, ti, current)
+    if not ok:
         deny(
             "this write targets %s but the gate cannot determine the resulting content "
             "from the tool input (tool=%r). Write the full document with Write, or use an "

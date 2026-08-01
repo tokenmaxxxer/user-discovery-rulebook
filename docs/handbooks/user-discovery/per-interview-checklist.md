@@ -19,7 +19,13 @@ Checklist run after each user-discovery interview round.
    at least one of these three tags be present in the record; it does not
    and cannot verify that individual claims are tagged correctly or that the
    prompted/unprompted flag is present — that judgment remains the
-   interviewer's.
+   interviewer's. A tag counts only in a structural position — a labeled
+   `evidence:` field, a heading, a list item, or a `[tag]` bracket — not a
+   bare word anywhere in flowing prose (issue-10 gate A+ upgrade); see
+   `docs/handbooks/gate-house-standard.md` for the shared gate machinery all
+   four of this rulebook's gates now source, and
+   `tests/run-all-gate-tests.sh` for the maintained regression suite that
+   must stay green whenever a gate script changes.
 
 4. Update the running saturation count for this study (interviews
    completed so far out of the sample). Note in the round's log whether
