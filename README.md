@@ -1,8 +1,7 @@
 # user-discovery-rulebook
 
 Rulebook for the `user-discovery` role (contract v3 role-handoff protocol), split off
-per `docs/issue-160/proposals/role-taxonomy.md`'s round-4 promotion and
-generated as skeleton scaffolding by issue-167.
+per `docs/issue-160/proposals/role-taxonomy.md`'s round-4 promotion.
 
 - **decides**: 이 문제가 실제 사용자의 고통인가
 - **use_when**: 가설 검증을 위해 사용자 인터뷰가 필요할 때
@@ -97,6 +96,3 @@ match replaced by structural — labeled-field/heading/list-item/bracket-tag
 — matching, closing the `'h1'`-inside-`'<h1>'` and bare-`'opinion'`-in-prose
 false positives). `tests/run-gate-lib-compliance-tests.sh` runs
 `compliance-check.sh` against all four gates' `hooks/` directories.
-
-This is scaffolding, not a finished rulebook: fill in doctrine detail and
-handoff enforcement before treating it as load-bearing.
