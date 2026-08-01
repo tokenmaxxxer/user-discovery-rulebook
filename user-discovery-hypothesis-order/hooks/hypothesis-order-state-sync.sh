@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh"
+. "${CLAUDE_PLUGIN_ROOT_CORE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../core" && pwd -P)}/hooks/lib/gate-lib.sh" || { echo "hypothesis-order-state-sync.sh: cannot source gate-lib.sh" >&2; exit 2; }
 set -uo pipefail 2>/dev/null || true
 # PostToolUse hook (Write|Edit|MultiEdit) — user-discovery-hypothesis-order's
 # state-sync half (issue-10 audit §"state update at PreToolUse time,

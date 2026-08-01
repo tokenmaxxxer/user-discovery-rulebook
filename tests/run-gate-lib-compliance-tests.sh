@@ -29,4 +29,6 @@ for dir in \
   bash "$COMPLIANCE_CHECK" "$dir" || rc=1
 done
 
+bash "$HERE/manifest-check.sh" || rc=1
+
 exit "$rc"

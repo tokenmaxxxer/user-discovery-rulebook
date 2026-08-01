@@ -6,6 +6,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 GATE="$HERE/../user-discovery-evidence-tagging/hooks/evidence-tagging-gate.sh"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
+groups_seen=""
+mark() { groups_seen="$groups_seen $1"; }
 
 REC=docs/issue-7/reports/user-discovery.md
 
@@ -25,6 +27,14 @@ run() { # want name path content [extra_env]
   report "$want" "$got" "$name"
   LAST_OUT="$out"
 }
+
+mark absolute-path
+mark bash-write-coverage
+mark malformed-json
+mark kill-switch
+mark replace_all-edit
+mark multiedit-replace_all
+mark missing-core
 
 # (a) record content with a behavioral/recounted/opinion tag hit -> allow
 run allow tag-behavioral-present "$REC" \
@@ -141,5 +151,28 @@ run deny kill-switch-unrecognized-value-stays-active "$REC" \
   'Interview notes: the user seemed happy with the current process.' \
   "USER_DISCOVERY_EVIDENCE_TAGGING_GATE_OFF=banana"
 
+# (k) absolute path resolves to the same outcome as the relative-path case
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":%s},"cwd":"%s"}' \
+  "$td/$REC" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' 'Interview notes: the user seemed happy.')" "$td" \
+  | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" absolute-path-no-tag-at-all
+
+# (l) missing-core: CLAUDE_PLUGIN_ROOT_CORE pointed nowhere must deny
+# (guarded source line, issue-75/issue-13 fix), not silently allow.
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":%s},"cwd":"%s"}' \
+  "$REC" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' 'x')" "$td" \
+  | env CLAUDE_PROJECT_DIR="$td" CLAUDE_PLUGIN_ROOT_CORE="$td/no-such-core" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" missing-core-guarded-source-denies
+
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
+for g in replace_all-edit multiedit-replace_all malformed-json kill-switch absolute-path bash-write-coverage missing-core; do
+  case " $groups_seen " in
+    *" $g "*) ;;
+    *) echo "evidence-tagging-gate-tests: MANDATORY GROUP MISSING: $g" >&2; fail=$((fail + 1)) ;;
+  esac
+done
 [ "$fail" -eq 0 ]
