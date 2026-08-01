@@ -6,6 +6,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 HOOK="$HERE/../user-discovery-hypothesis-order/hooks/hypothesis-order-gate.sh"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
+groups_seen=""
+mark() { groups_seen="$groups_seen $1"; }
+mark absolute-path
+mark bash-write-coverage
+mark malformed-json
+mark kill-switch
+mark replace_all-edit
+mark multiedit-replace_all
+mark missing-core
 
 REC=docs/issue-7/reports/user-discovery.md
 
@@ -101,5 +110,93 @@ else
   fail=$((fail+1)); printf 'FAIL   %-34s state changed on a denied write: before=%s after=%s\n' "state-unchanged-on-deny" "$before" "$after"
 fi
 
+# (k) kill-switch unrecognized value (e.g. a typo) must NOT disable the gate
+run deny kill-switch-unrecognized-value-stays-active "$REC" 'verdict: pain-confirmed' \
+  USER_DISCOVERY_HYPOTHESIS_ORDER_GATE_OFF=banana
+
+# (l) Bash-tool write reaching this gate's owned record path is denied
+# (the gate only inspects Write/Edit/MultiEdit/NotebookEdit content).
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+printf '{"tool_name":"Bash","tool_input":{"command":"printf x > %s"},"cwd":"%s"}' "$REC" "$td" \
+  | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$HOOK" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" bash-tool-write-to-owned-path
+
+# (m) malformed JSON — truncated, non-object, empty — all deny (exit 2)
+for label_payload in \
+  'truncated-json:{"tool_name":"Write","tool_input":' \
+  'non-object-json:[1,2,3]' \
+  'empty-payload:'; do
+  label="${label_payload%%:*}"
+  bad_payload="${label_payload#*:}"
+  td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+  printf '%s' "$bad_payload" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$HOOK" >/dev/null 2>&1
+  rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"; report deny "$got" "malformed-json-$label"
+done
+
+# (n) Edit with replace_all: true against a doubly-occurring evidence tag:
+# removing BOTH occurrences leaves the verdict with no evidence logged at
+# all -> deny. A first-occurrence-only bug would leave the second tag
+# intact and wrongly allow.
+run_edit() { # want name old new replace_all pre_content
+  local want="$1" name="$2" old="$3" new="$4" replace_all="$5" pre="$6"
+  td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"
+  mkdir -p "$td/$(dirname "$REC")"
+  printf '%s' "$pre" > "$td/$REC"
+  payload="$(python3 -c '
+import json, sys
+old, new, ra, pre = sys.argv[1], sys.argv[2], sys.argv[3] == "true", sys.argv[4]
+print(json.dumps({"tool_name": "Edit", "tool_input": {"file_path": sys.argv[5], "old_string": old, "new_string": new, "replace_all": ra}, "cwd": sys.argv[6]}))
+' "$old" "$new" "$replace_all" "$pre" "$REC" "$td")"
+  printf '%s' "$payload" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$HOOK" >/dev/null 2>&1
+  rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"; report "$want" "$got" "$name"
+}
+run_edit deny edit-replace-all-both-occurrences \
+  'evidence: behavioral' 'note: nothing' 'true' \
+  'evidence: behavioral observation logged.
+evidence: behavioral confirmed again.
+verdict: pain-confirmed'
+
+# (o) MultiEdit with a mix of replace_all:false/true edits in one call.
+# Pre-content has two evidence tags. Edit 1 (replace_all:false) rewrites an
+# unrelated span; edit 2 (replace_all:true) removes the evidence-tag phrase
+# everywhere, of which two remain -- a correct per-edit-flag reconstruction
+# removes both (deny, no evidence left); a collapsed-to-count=1 bug would
+# leave one behind (wrongly allow).
+run_multiedit() { # want name pre edits_json
+  local want="$1" name="$2" pre="$3" edits_json="$4"
+  td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"
+  mkdir -p "$td/$(dirname "$REC")"
+  printf '%s' "$pre" > "$td/$REC"
+  payload="$(python3 -c '
+import json, sys
+edits = json.loads(sys.argv[1])
+print(json.dumps({"tool_name": "MultiEdit", "tool_input": {"file_path": sys.argv[2], "edits": edits}, "cwd": sys.argv[3]}))
+' "$edits_json" "$REC" "$td")"
+  printf '%s' "$payload" | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$HOOK" >/dev/null 2>&1
+  rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+  rm -rf "$td"; report "$want" "$got" "$name"
+}
+run_multiedit deny multiedit-mixed-replace-all \
+  'Intro. evidence: behavioral observation logged. evidence: behavioral confirmed again. verdict: pain-confirmed' \
+  '[{"old_string":"Intro.","new_string":"Introduction.","replace_all":false},{"old_string":"evidence: behavioral","new_string":"note: nothing","replace_all":true}]'
+
+# (p) missing-core: CLAUDE_PLUGIN_ROOT_CORE pointed nowhere must deny
+# (guarded source line, issue-75/issue-13 fix), not silently allow.
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":%s},"cwd":"%s"}' \
+  "$REC" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' 'x')" "$td" \
+  | env CLAUDE_PROJECT_DIR="$td" CLAUDE_PLUGIN_ROOT_CORE="$td/no-such-core" /bin/bash "$HOOK" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" missing-core-guarded-source-denies
+
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
+for g in replace_all-edit multiedit-replace_all malformed-json kill-switch absolute-path bash-write-coverage missing-core; do
+  case " $groups_seen " in
+    *" $g "*) ;;
+    *) echo "hypothesis-order-gate-tests: MANDATORY GROUP MISSING: $g" >&2; fail=$((fail + 1)) ;;
+  esac
+done
 [ "$fail" -eq 0 ]

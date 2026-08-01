@@ -25,7 +25,13 @@ Checklist run after each user-discovery interview round.
    `docs/handbooks/gate-house-standard.md` for the shared gate machinery all
    four of this rulebook's gates now source, and
    `tests/run-all-gate-tests.sh` for the maintained regression suite that
-   must stay green whenever a gate script changes.
+   must stay green whenever a gate script changes. All four enforcement
+   gates now source `gate-lib.sh` with a guarded fallback (fail-closed —
+   hard-denies rather than fail-open — if core cannot be resolved) and
+   every gate's suite carries the mandatory `missing-core` regression case
+   for it (issue-13 gate A+ closeout); `tests/manifest-check.sh`, run as
+   part of the same suite, hard-fails on any README/manifest reference to
+   a file that no longer exists or to a retired role name.
 
 4. Update the running saturation count for this study (interviews
    completed so far out of the sample). Note in the round's log whether
