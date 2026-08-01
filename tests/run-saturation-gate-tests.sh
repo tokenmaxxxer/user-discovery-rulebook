@@ -2,6 +2,7 @@
 # Real-subprocess tests for user-discovery-saturation/hooks/saturation-gate.sh
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+. "$HERE/resolve-core.sh"
 GATE="$HERE/../user-discovery-saturation/hooks/saturation-gate.sh"
 pass=0; fail=0
 report() { if [ "$2" = "$1" ]; then pass=$((pass+1)); printf 'ok     %-34s %s\n' "$3" "$2"; else fail=$((fail+1)); printf 'FAIL   %-34s want=%s got=%s\n' "$3" "$1" "$2"; fi; }
@@ -72,6 +73,27 @@ if printf '%s' "$msg" | grep -qi 'residual'; then
 else
   fail=$((fail+1)); printf 'FAIL   %-34s message did not name residual: %s\n' "deny-message-residual" "$msg"
 fi
+
+# (g) kill-switch unrecognized value (e.g. a typo) must NOT disable the gate
+run deny kill-switch-unrecognized-value-stays-active "$REC" \
+  'Overall verdict: pain-confirmed. Users clearly want this.' \
+  "USER_DISCOVERY_SATURATION_GATE_OFF=banana"
+
+# (h) Bash-tool write reaching this gate's owned record path is denied
+# (previously invisible — the gate only matched Write/Edit/MultiEdit).
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+printf '{"tool_name":"Bash","tool_input":{"command":"printf x > %s"},"cwd":"%s"}' "$REC" "$td" \
+  | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" bash-tool-write-to-owned-path
+
+# (i) absolute path resolves to the same outcome as the relative-path case
+td="$(cd "$(mktemp -d)" && pwd -P)"; git init -q "$td"; mkdir -p "$td/$(dirname "$REC")"
+printf '{"tool_name":"Write","tool_input":{"file_path":"%s","content":%s},"cwd":"%s"}' \
+  "$td/$REC" "$(python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' 'Overall verdict: pain-confirmed. Users clearly want this.')" "$td" \
+  | env CLAUDE_PROJECT_DIR="$td" /bin/bash "$GATE" >/dev/null 2>&1
+rc=$?; case "$rc" in 0) got=allow ;; 2) got=deny ;; *) got="exit-$rc" ;; esac
+rm -rf "$td"; report deny "$got" absolute-path-verdict-no-prevalence
 
 printf '\n== %d passed, %d failed ==\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

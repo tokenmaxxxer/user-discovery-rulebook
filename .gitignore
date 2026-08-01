@@ -1,0 +1,4 @@
+# Gate-generated runtime state (hypothesis-order plugin), not source content.
+.state.json
+__pycache__/
+*.pyc
